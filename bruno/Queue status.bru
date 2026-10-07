@@ -1,0 +1,15 @@
+meta {
+  name: Queue status
+  type: http
+  seq: 8
+}
+
+get {
+  url: {{baseUrl}}/events/1/queue/status?userId=1
+  body: none
+  auth: none
+}
+
+params:query {
+  userId: 1
+}

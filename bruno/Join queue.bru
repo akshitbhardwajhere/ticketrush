@@ -1,0 +1,15 @@
+meta {
+  name: Join queue
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{baseUrl}}/events/1/queue/join
+  body: json
+  auth: none
+}
+
+body:json {
+  { "userId": 1 }
+}

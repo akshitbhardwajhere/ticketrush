@@ -1,0 +1,91 @@
+import http from "k6/http";
+import { check, sleep } from "k6";
+
+const BASE = __ENV.BASE_URL || "http://localhost:3000";
+const JSON_HEADERS = { "Content-Type": "application/json" };
+
+// 409 (seat le li) aur 429 (rate limit) expected hain, sirf 5xx "failure" gina jaaye
+http.setResponseCallback(http.expectedStatuses(200, 201, 409, 429));
+
+export const options = {
+  stages: [
+    { duration: "20s", target: 100 }, // ramp up
+    { duration: "40s", target: 100 }, // steady load
+    { duration: "10s", target: 0 }, // ramp down
+  ],
+  thresholds: {
+    http_req_failed: ["rate<0.01"],
+    "http_req_duration{name:hold}": ["p(95)<100"],
+    "http_req_duration{name:list_seats}": ["p(95)<300"],
+    "http_req_duration{name:pay}": ["p(95)<1000"], // isme mock gateway ke 300-800ms shaamil hain
+  },
+};
+
+export function setup() {
+  const ev = http
+    .post(
+      `${BASE}/events`,
+      JSON.stringify({
+        name: "Load Test",
+        startsAt: "2026-12-31T18:00:00Z",
+        seats: 3000,
+      }),
+      { headers: JSON_HEADERS },
+    )
+    .json();
+
+  const seats = http
+    .get(`${BASE}/events/${ev.id}/seats`)
+    .json()
+    .map((s) => s.id);
+
+  const users = [];
+  for (let i = 0; i < 100; i++) {
+    users.push(
+      http
+        .post(`${BASE}/users`, JSON.stringify({ email: `k6-${i}@test.com` }), {
+          headers: JSON_HEADERS,
+        })
+        .json().id,
+    );
+  }
+  console.log(`EVENT_ID=${ev.id}`);
+  return { eventId: ev.id, seats, users };
+}
+
+export default function (data) {
+  const userId = data.users[(__VU - 1) % data.users.length];
+
+  // Har 10 iteration mein ek baar seat map dekho
+  if (__ITER % 10 === 0) {
+    http.get(`${BASE}/events/${data.eventId}/seats`, {
+      tags: { name: "list_seats" },
+    });
+  }
+
+  const seatId = data.seats[Math.floor(Math.random() * data.seats.length)];
+  const hold = http.post(
+    `${BASE}/events/${data.eventId}/seats/${seatId}/hold`,
+    JSON.stringify({ userId }),
+    { headers: JSON_HEADERS, tags: { name: "hold" } },
+  );
+  check(hold, {
+    "hold: 201/409/429": (r) => [201, 409, 429].includes(r.status),
+  });
+
+  if (hold.status === 201) {
+    const pay = http.post(
+      `${BASE}/events/${data.eventId}/seats/${seatId}/pay`,
+      JSON.stringify({ userId, amountPaise: 150000 }),
+      {
+        headers: {
+          ...JSON_HEADERS,
+          "Idempotency-Key": `${__VU}-${__ITER}-${Date.now()}`,
+        },
+        tags: { name: "pay" },
+      },
+    );
+    check(pay, { "pay: 200": (r) => r.status === 200 });
+  }
+  sleep(1);
+}

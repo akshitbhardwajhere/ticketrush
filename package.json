@@ -1,0 +1,38 @@
+{
+  "name": "ticketrush",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/src/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "start": "node dist/src/server.js",
+    "flash-sale": "tsx scripts/flash-sale.ts",
+    "rate-limit:test": "tsx scripts/rl-test.ts",
+    "load:k6": "k6 run scripts/load.ts",
+    "load:gated:k6": "k6 run scripts/load-gated.ts",
+    "create-tables": "docker compose exec -T db psql -U postgres -d ticketrush < schema.sql && docker compose exec -T db psql -U postgres -d ticketrush < migrations/002_payments.sql && docker compose exec -T db psql -U postgres -d ticketrush < migrations/003_integrity_constraints.sql"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "dotenv": "^18.0.6",
+    "express": "^5.2.1",
+    "ioredis": "^6.0.0",
+    "pg": "^8.23.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.4",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}

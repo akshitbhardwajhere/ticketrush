@@ -1,0 +1,10 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: pass
+      POSTGRES_DB: ticketrush
+    ports: ["5441:5432"]
+  redis:
+    image: redis:7
+    ports: ["6331:6379"]

@@ -1,0 +1,15 @@
+meta {
+  name: Hold seat
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseUrl}}/events/1/seats/1/hold
+  body: json
+  auth: none
+}
+
+body:json {
+  { "userId": 1 }
+}

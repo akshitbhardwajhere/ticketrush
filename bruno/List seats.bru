@@ -1,0 +1,15 @@
+meta {
+  name: List seats
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseUrl}}/events/1/seats
+  body: none
+  auth: none
+}
+
+vars:pre-request {
+  eventId: 2
+}

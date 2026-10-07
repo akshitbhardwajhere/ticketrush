@@ -1,0 +1,22 @@
+meta {
+  name: Pay for seat
+  type: http
+  seq: 9
+}
+
+post {
+  url: {{baseUrl}}/events/1/seats/1/pay
+  body: json
+  auth: none
+}
+
+headers {
+  Idempotency-Key: {{$randomUUID}}
+}
+
+body:json {
+  {
+    "userId": 1,
+    "amountPaise": 150000
+  }
+}

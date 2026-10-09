@@ -106,7 +106,7 @@ The booking flow is `Create user`, `Create event`, `List seats`, `Join queue`, `
 ## Run locally
 
 ```sh
-git clone https://github.com/<your-username>/ticketrush.git
+git clone https://github.com/akshitbhardwajhere/ticketrush.git
 cd ticketrush
 npm install
 docker compose up -d

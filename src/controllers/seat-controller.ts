@@ -2,10 +2,8 @@ import type { Request, Response } from "express";
 import { z } from "zod";
 import { holdSeat } from "../services/seat-service.js";
 
-const userBodySchema = z.object({ userId: z.number().int() });
-
 export async function holdSeatHandler(req: Request, res: Response) {
-  const { userId } = userBodySchema.parse(req.body);
+  const userId = req.user!.id;
   const eventId = z.coerce.number().int().positive().parse(req.params.eventId);
   const seatId = z.coerce.number().int().positive().parse(req.params.seatId);
   const seat = await holdSeat(userId, eventId, seatId);

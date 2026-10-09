@@ -8,6 +8,7 @@ import { holdRateLimit } from "../middlewares/hold-rate-limit.js";
 import { requireAdmission } from "../queue.js";
 import { holdSeatHandler } from "../controllers/seat-controller.js";
 import { payForSeatHandler } from "../controllers/payment-controller.js";
+import { requireAuth } from "../middlewares/auth.js";
 
 export const eventRoutes = Router();
 
@@ -16,8 +17,9 @@ eventRoutes.get("/", listEventsHandler);
 eventRoutes.get("/:id/seats", listEventSeatsHandler);
 eventRoutes.post(
   "/:eventId/seats/:seatId/hold",
+  requireAuth,
   holdRateLimit,
   requireAdmission,
   holdSeatHandler,
 );
-eventRoutes.post("/:eventId/seats/:seatId/pay", payForSeatHandler);
+eventRoutes.post("/:eventId/seats/:seatId/pay", requireAuth, payForSeatHandler);

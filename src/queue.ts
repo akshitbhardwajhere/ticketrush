@@ -2,6 +2,7 @@ import express from "express";
 import { z } from "zod";
 import { redis } from "./redis.js";
 import { pool } from "./db.js";
+import { requireAuth } from "./middlewares/auth.js";
 
 export const queueRouter = express.Router();
 
@@ -12,46 +13,59 @@ const PASS_TTL_SEC = Number(process.env.PASS_TTL_SEC ?? 120);
 const ADMIT_PER_TICK = Number(process.env.ADMIT_PER_TICK ?? 20);
 
 // Queue mein judo
-queueRouter.post("/events/:eventId/queue/join", async (req, res) => {
-  const { userId } = z
-    .object({ userId: z.number().int().positive() })
-    .parse(req.body);
-  const eventId = z.coerce.number().int().positive().parse(req.params.eventId);
-  const exists = await pool.query(
-    `SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)
+queueRouter.post(
+  "/events/:eventId/queue/join",
+  requireAuth,
+  async (req, res) => {
+    const userId = req.user!.id;
+    const eventId = z.coerce
+      .number()
+      .int()
+      .positive()
+      .parse(req.params.eventId);
+    const exists = await pool.query(
+      `SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)
        AND EXISTS (SELECT 1 FROM events WHERE id = $2) AS valid`,
-    [userId, eventId],
-  );
-  if (!exists.rows[0]?.valid) {
-    return res.status(404).json({ error: "User or event not found" });
-  }
+      [userId, eventId],
+    );
+    if (!exists.rows[0]?.valid) {
+      return res.status(404).json({ error: "User or event not found" });
+    }
 
-  const eventKey = String(eventId);
-  const ttl = await redis.ttl(passKey(eventKey, userId));
-  if (ttl > 0) return res.json({ status: "ADMITTED", expiresInSec: ttl });
+    const eventKey = String(eventId);
+    const ttl = await redis.ttl(passKey(eventKey, userId));
+    if (ttl > 0) return res.json({ status: "ADMITTED", expiresInSec: ttl });
 
-  // NX: dobara join karne par apni purani jagah nahi khoyega
-  await redis.zadd(queueKey(eventKey), "NX", Date.now(), String(userId));
-  await redis.sadd("queues", eventKey);
-  const rank = await redis.zrank(queueKey(eventKey), String(userId));
-  res.json({ status: "WAITING", position: (rank ?? 0) + 1 });
-});
+    // NX: dobara join karne par apni purani jagah nahi khoyega
+    await redis.zadd(queueKey(eventKey), "NX", Date.now(), String(userId));
+    await redis.sadd("queues", eventKey);
+    const rank = await redis.zrank(queueKey(eventKey), String(userId));
+    res.json({ status: "WAITING", position: (rank ?? 0) + 1 });
+  },
+);
 
 // Apni position / admission check karo
-queueRouter.get("/events/:eventId/queue/status", async (req, res) => {
-  const { userId } = z
-    .object({ userId: z.coerce.number().int().positive() })
-    .parse(req.query);
-  const eventId = z.coerce.number().int().positive().parse(req.params.eventId);
-  const eventKey = String(eventId);
+queueRouter.get(
+  "/events/:eventId/queue/status",
+  requireAuth,
+  async (req, res) => {
+    const userId = req.user!.id;
+    const eventId = z.coerce
+      .number()
+      .int()
+      .positive()
+      .parse(req.params.eventId);
+    const eventKey = String(eventId);
 
-  const ttl = await redis.ttl(passKey(eventKey, userId));
-  if (ttl > 0) return res.json({ status: "ADMITTED", expiresInSec: ttl });
+    const ttl = await redis.ttl(passKey(eventKey, userId));
+    if (ttl > 0) return res.json({ status: "ADMITTED", expiresInSec: ttl });
 
-  const rank = await redis.zrank(queueKey(eventKey), String(userId));
-  if (rank !== null) return res.json({ status: "WAITING", position: rank + 1 });
-  res.json({ status: "NOT_IN_QUEUE" });
-});
+    const rank = await redis.zrank(queueKey(eventKey), String(userId));
+    if (rank !== null)
+      return res.json({ status: "WAITING", position: rank + 1 });
+    res.json({ status: "NOT_IN_QUEUE" });
+  },
+);
 
 // Har second queue ke aage se N log andar bhejo
 export function startAdmitter() {
@@ -88,7 +102,7 @@ export const requireAdmission: express.RequestHandler = async (
 ) => {
   if (process.env.QUEUE_GATE !== "on") return next();
   const eventId = z.coerce.number().int().positive().parse(req.params.eventId);
-  const userId = z.coerce.number().int().positive().parse(req.body?.userId);
+  const userId = req.user!.id;
   const ok = await redis.exists(passKey(String(eventId), userId));
   if (!ok) return res.status(403).json({ error: "Join the queue first" });
   next();

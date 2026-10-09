@@ -30,6 +30,9 @@ services:
       PAYMENT_GATEWAY: ${PAYMENT_GATEWAY:-mock}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       PAYMENT_CURRENCY: ${PAYMENT_CURRENCY:-inr}
+      QUEUE_GATE: ${QUEUE_GATE:-off}
+      ADMIT_PER_TICK: ${ADMIT_PER_TICK:-20}
+      PASS_TTL_SEC: ${PASS_TTL_SEC:-120}
       PORT: 3000
       INSTANCE_ID: api-1
     depends_on:

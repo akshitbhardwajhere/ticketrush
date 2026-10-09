@@ -22,29 +22,22 @@ A concurrency-safe ticket booking backend (think BookMyShow): seats can never be
 | Two users grab the same seat            | The check and the write are one SQL statement (`UPDATE ... WHERE status = 'AVAILABLE' OR hold expired`). Postgres row locks serialise concurrent updates, so exactly one wins. Payment re-checks the hold under `SELECT ... FOR UPDATE` inside the booking transaction. |
 | Abandoned holds                         | `hold_expires_at` is checked in the same `WHERE` clause, so expired holds are reclaimed lazily with no cron job.                                                                                                                                                        |
 | Double charge on retry or double-click  | The client sends an `Idempotency-Key`. The key is claimed with `INSERT ... ON CONFLICT DO NOTHING` (atomic). Same key and same body replays the stored response, same key with a different body returns 422, and a concurrent duplicate gets 409 "in progress".         |
-| Hold expires while payment is in flight | The booking transaction re-validates the hold. If it is gone, the payment is marked `REFUND_REQUIRED` and an outbox event schedules an idempotent refund.                                                                                                           |
+| Hold expires while payment is in flight | The booking transaction re-validates the hold. If it is gone, the payment is marked `REFUND_REQUIRED` and an outbox event schedules an idempotent refund.                                                                                                               |
 | Bots and abusive clients                | Token bucket in Redis, written as a Lua script so read-modify-write is atomic. It uses Redis `TIME` (no clock skew between servers) and fails open if Redis is down.                                                                                                    |
 | Traffic spikes                          | Waiting room: a Redis sorted set (FIFO by join time). A background admitter pops N users per second (`ZPOPMIN` is atomic, so it is safe with several server instances) and issues passes with a TTL. Enabled with `QUEUE_GATE=on`.                                      |
 
 ## Results
 
-Measured on a single laptop (API, PostgreSQL, Redis and k6 on the same machine) with a **simulated** payment gateway (300-800 ms latency). These are development-machine numbers, not production benchmarks.
+Measured locally on 2026-10-09 with three API replicas behind HAProxy, 100 VUs, 3,000 seats, and the mock gateway. These are development measurements, not capacity guarantees.
 
-**k6 load test, queue gate off:** 100 concurrent users, 70 s, about 100 req/s sustained, 0% server errors.
+| Profile | Result |
+| --- | --- |
+| Gate off | 6,325 requests, 0% HTTP failures; hold p95 3.6ms, seat list p95 6.26ms, pay p95 1.44s |
+| Gate on (`ADMIT_PER_TICK=20`) | 6,501 requests, 0% HTTP failures; hold p95 3.35ms, queue status p95 2.63ms, queue wait p95 1.01s |
 
-| Endpoint                | p95 latency                                 |
-| ----------------------- | ------------------------------------------- |
-| Hold seat               | 3.3 ms                                      |
-| Seat list (3,000 seats) | 4.8 ms                                      |
-| Pay                     | 774 ms (dominated by the simulated gateway) |
+All load-test checks passed. The ungated pay target of `<1s` was exceeded because the mock gateway adds 300-800ms latency under concurrency. Load tests use `PAYMENT_GATEWAY=mock`; Stripe test payments should be tested separately.
 
-The ~100 req/s figure is the load profile of the test (each virtual user waits 1 s between iterations), not the server's capacity limit.
-
-**Correctness under load**, verified with SQL after the runs: 2,283 bookings in one run and 2,316 in another, with 0 seats holding more than one successful payment and booked seats equal to successful payments.
-
-**Flash-sale simulation** (300 users, 50 seats, queue enabled): exactly 50 winners, no oversold seats, finished in about 7 s.
-
-**Waiting room** (100 users, admission limited to 2 per second): median queue wait about 20 s, p95 about 35 s, while hold p95 stayed around 4 ms and queue-status p95 around 1.5 ms, with 0 errors. This demonstrates throttled, FIFO admission. It is not a claim of lower latency, because the database was not the bottleneck at this load.
+Post-run SQL invariants: 445 successful payments, 445 booked seats, and 0 duplicate successful payments for one seat.
 
 ## Architecture
 
@@ -195,19 +188,19 @@ The same `BASE_URL=http://127.0.0.1:3002` and mock-gateway recommendation applie
 
 Copy the local values into `.env` when overriding defaults:
 
-| Variable         | Default                                              | Purpose                                          |
-| ---------------- | ---------------------------------------------------- | ------------------------------------------------ |
-| `PORT`           | `3000`                                               | HTTP server port                                 |
-| `DATABASE_URL`   | `postgres://postgres:pass@localhost:5441/ticketrush` | PostgreSQL connection                            |
-| `REDIS_URL`      | `redis://localhost:6331`                             | Redis connection                                 |
-| `QUEUE_GATE`     | `off`                                                | Set to `on` to require queue admission for holds |
-| `ADMIT_PER_TICK` | `20`                                                 | Queue admissions per second                      |
-| `PASS_TTL_SEC`   | `120`                                                | How long an admission pass stays valid           |
-| `FAIL_RATE`      | `0`                                                  | Simulated payment gateway failure rate           |
-| `PAYMENT_GATEWAY` | `mock`                                               | Set to `stripe` to enable Stripe PaymentIntents  |
-| `STRIPE_SECRET_KEY` | unset                                             | Stripe secret key; keep it in `.env` or a secret manager |
-| `PAYMENT_CURRENCY` | `inr`                                               | Stripe currency                                  |
-| `API_HTTP_PORT`  | `3000`                                               | Host port published by HAProxy                   |
+| Variable            | Default                                              | Purpose                                                  |
+| ------------------- | ---------------------------------------------------- | -------------------------------------------------------- |
+| `PORT`              | `3000`                                               | HTTP server port                                         |
+| `DATABASE_URL`      | `postgres://postgres:pass@localhost:5441/ticketrush` | PostgreSQL connection                                    |
+| `REDIS_URL`         | `redis://localhost:6331`                             | Redis connection                                         |
+| `QUEUE_GATE`        | `off`                                                | Set to `on` to require queue admission for holds         |
+| `ADMIT_PER_TICK`    | `20`                                                 | Queue admissions per second                              |
+| `PASS_TTL_SEC`      | `120`                                                | How long an admission pass stays valid                   |
+| `FAIL_RATE`         | `0`                                                  | Simulated payment gateway failure rate                   |
+| `PAYMENT_GATEWAY`   | `mock`                                               | Set to `stripe` to enable Stripe PaymentIntents          |
+| `STRIPE_SECRET_KEY` | unset                                                | Stripe secret key; keep it in `.env` or a secret manager |
+| `PAYMENT_CURRENCY`  | `inr`                                                | Stripe currency                                          |
+| `API_HTTP_PORT`     | `3000`                                               | Host port published by HAProxy                           |
 
 ## Database changes
 

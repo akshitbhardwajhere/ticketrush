@@ -12,7 +12,8 @@
     "rate-limit:test": "tsx scripts/rl-test.ts",
     "load:k6": "k6 run scripts/load.ts",
     "load:gated:k6": "k6 run scripts/load-gated.ts",
-    "create-tables": "docker compose exec -T db psql -U postgres -d ticketrush < schema.sql && docker compose exec -T db psql -U postgres -d ticketrush < migrations/002_payments.sql && docker compose exec -T db psql -U postgres -d ticketrush < migrations/003_integrity_constraints.sql"
+    "create-tables": "docker compose exec -T db psql -U postgres -d ticketrush < schema.sql && docker compose exec -T db psql -U postgres -d ticketrush < migrations/002_payments.sql && docker compose exec -T db psql -U postgres -d ticketrush < migrations/003_integrity_constraints.sql && docker compose exec -T db psql -U postgres -d ticketrush < migrations/004_auth_outbox.sql",
+    "test": "tsx --test test/**/*.test.ts"
   },
   "keywords": [],
   "author": "",
@@ -23,6 +24,7 @@
     "express": "^5.2.1",
     "ioredis": "^6.0.0",
     "pg": "^8.23.1",
+    "stripe": "^23.0.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {

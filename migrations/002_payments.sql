@@ -1,4 +1,4 @@
-CREATE TABLE payments (
+CREATE TABLE IF NOT EXISTS payments (
     id SERIAL PRIMARY KEY,
     idempotency_key TEXT UNIQUE NOT NULL,
     user_id INT NOT NULL REFERENCES users (id),

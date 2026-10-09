@@ -23,12 +23,18 @@ export async function processPayment(input: {
   seatId: number;
   userId: number;
   amountPaise: number;
+  paymentMethodId?: string;
 }) {
   const user = await pool.query("SELECT id FROM users WHERE id = $1", [
     input.userId,
   ]);
   if (user.rowCount === 0) {
     return { status: 404, body: { error: "User not found" } };
+  }
+
+  const seat = await getSeatForEvent(pool, input.eventId, input.seatId);
+  if (!seat) {
+    return { status: 404, body: { error: "Seat not found" } };
   }
 
   const requestHash = createHash("sha256")
@@ -69,16 +75,23 @@ export async function processPayment(input: {
   }
 
   const paymentId = claim.rows[0].id as number;
-  const seat = await getSeatForEvent(pool, input.eventId, input.seatId);
   if (!isValidHold(seat, input.userId)) {
     const body = { error: "No valid hold for this user" };
     await recordPayment(pool, paymentId, "FAILED", 409, body);
     return { status: 409, body };
   }
 
-  const result = await charge(input.key, input.amountPaise);
+  const result = await charge(
+    input.key,
+    input.amountPaise,
+    input.paymentMethodId,
+  );
   if (!result.ok) {
-    const body = { error: "Payment declined" };
+    const body = {
+      error: "Payment was not completed",
+      reason: result.error ?? "Payment declined",
+      ...(result.status ? { paymentStatus: result.status } : {}),
+    };
     await recordPayment(pool, paymentId, "FAILED", 402, body);
     return { status: 402, body };
   }
@@ -98,6 +111,14 @@ export async function processPayment(input: {
         error: "Hold expired during payment. Refund will be issued.",
       };
       await recordPayment(pool, paymentId, "REFUND_REQUIRED", 409, body);
+      await pool.query(
+        `INSERT INTO outbox_events (topic, aggregate_id, payload)
+         VALUES ('payment.refund_required', $1, $2)`,
+        [
+          String(paymentId),
+          JSON.stringify({ paymentId, chargeId: result.chargeId }),
+        ],
+      );
       return { status: 409, body };
     }
     await client.query(
@@ -109,6 +130,20 @@ export async function processPayment(input: {
       status: "BOOKED",
       chargeId: result.chargeId,
     };
+    await client.query(
+      `INSERT INTO outbox_events (topic, aggregate_id, payload)
+       VALUES ('payment.succeeded', $1, $2)`,
+      [
+        String(paymentId),
+        JSON.stringify({
+          paymentId,
+          userId: input.userId,
+          eventId: input.eventId,
+          seatId: input.seatId,
+          chargeId: result.chargeId,
+        }),
+      ],
+    );
     await recordPayment(client, paymentId, "SUCCEEDED", 200, body);
     await client.query("COMMIT");
     return { status: 200, body };

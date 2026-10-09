@@ -28,16 +28,16 @@ A concurrency-safe ticket booking backend (think BookMyShow): seats can never be
 
 ## Results
 
-Measured locally on 2026-10-09 with three API replicas behind HAProxy, 100 VUs, 3,000 seats, and the mock gateway. These are development measurements, not capacity guarantees.
+Measured locally on 2026-10-09 with three API replicas behind HAProxy, 100 VUs, 3,000 seats, and Stripe test mode. These are development measurements, not capacity guarantees.
 
 | Profile | Result |
 | --- | --- |
-| Gate off | 6,325 requests, 0% HTTP failures; hold p95 3.6ms, seat list p95 6.26ms, pay p95 1.44s |
-| Gate on (`ADMIT_PER_TICK=20`) | 6,501 requests, 0% HTTP failures; hold p95 3.35ms, queue status p95 2.63ms, queue wait p95 1.01s |
+| Gate off | 6,324 requests, 0% HTTP failures; hold p95 3.75ms, seat list p95 6.33ms, pay p95 1.40s |
+| Gate on (`ADMIT_PER_TICK=20`) | 6,516 requests, 0% HTTP failures; hold p95 4.7ms, queue status p95 2.82ms, queue wait p95 1.01s |
 
-All load-test checks passed. The ungated pay target of `<1s` was exceeded because the mock gateway adds 300-800ms latency under concurrency. Load tests use `PAYMENT_GATEWAY=mock`; Stripe test payments should be tested separately.
+All load-test checks passed. The ungated pay target of `<1s` was exceeded by Stripe network/API latency under concurrency. Queue time is measured separately, so gate-on hold p95 only includes the post-admission database request.
 
-Post-run SQL invariants: 445 successful payments, 445 booked seats, and 0 duplicate successful payments for one seat.
+Post-run SQL invariants: 589 successful Stripe PaymentIntents, 589 booked seats, and 0 duplicate successful payments for one seat.
 
 ## Architecture
 

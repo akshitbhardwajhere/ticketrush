@@ -13,3 +13,8 @@ post {
 body:json {
   { "name": "Coldplay Mumbai", "startsAt": "2026-12-01T18:00:00Z", "seats": 100 }
 }
+
+script:post-response {
+  bru.setEnvVar("eventId", res.body.id);
+  bru.setEnvVar("seatId", 1);
+}

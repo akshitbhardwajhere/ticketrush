@@ -3,9 +3,12 @@ import { check, sleep } from "k6";
 
 const BASE = __ENV.BASE_URL || "http://localhost:3000";
 const JSON_HEADERS = { "Content-Type": "application/json" };
+const PASSWORD = "load-test-password-2026";
 
 // 409 (seat le li) aur 429 (rate limit) expected hain, sirf 5xx "failure" gina jaaye
-http.setResponseCallback(http.expectedStatuses(200, 201, 409, 429));
+http.setResponseCallback(
+  http.expectedStatuses(200, 201, 400, 401, 402, 404, 409, 429),
+);
 
 export const options = {
   stages: [
@@ -39,22 +42,37 @@ export function setup() {
     .json()
     .map((s) => s.id);
 
+  const runId = `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
   const users = [];
   for (let i = 0; i < 100; i++) {
-    users.push(
-      http
-        .post(`${BASE}/users`, JSON.stringify({ email: `k6-${i}@test.com` }), {
-          headers: JSON_HEADERS,
-        })
-        .json().id,
+    const email = `k6-${runId}-${i}@test.com`;
+    const create = http.post(
+      `${BASE}/users`,
+      JSON.stringify({ email, password: PASSWORD }),
+      { headers: JSON_HEADERS },
     );
+    check(create, { "user: created": (r) => r.status === 201 });
+    const login = http.post(
+      `${BASE}/users/login`,
+      JSON.stringify({ email, password: PASSWORD }),
+      { headers: JSON_HEADERS },
+    );
+    const token = login.json("token");
+    check(login, {
+      "user: logged in": (r) => r.status === 200 && typeof token === "string",
+    });
+    users.push({ token });
   }
   console.log(`EVENT_ID=${ev.id}`);
   return { eventId: ev.id, seats, users };
 }
 
 export default function (data) {
-  const userId = data.users[(__VU - 1) % data.users.length];
+  const user = data.users[(__VU - 1) % data.users.length];
+  const authHeaders = {
+    ...JSON_HEADERS,
+    Authorization: `Bearer ${user.token}`,
+  };
 
   // Har 10 iteration mein ek baar seat map dekho
   if (__ITER % 10 === 0) {
@@ -66,8 +84,8 @@ export default function (data) {
   const seatId = data.seats[Math.floor(Math.random() * data.seats.length)];
   const hold = http.post(
     `${BASE}/events/${data.eventId}/seats/${seatId}/hold`,
-    JSON.stringify({ userId }),
-    { headers: JSON_HEADERS, tags: { name: "hold" } },
+    JSON.stringify({}),
+    { headers: authHeaders, tags: { name: "hold" } },
   );
   check(hold, {
     "hold: 201/409/429": (r) => [201, 409, 429].includes(r.status),
@@ -76,10 +94,10 @@ export default function (data) {
   if (hold.status === 201) {
     const pay = http.post(
       `${BASE}/events/${data.eventId}/seats/${seatId}/pay`,
-      JSON.stringify({ userId, amountPaise: 150000 }),
+      JSON.stringify({ amountPaise: 150000, paymentMethodId: "pm_card_visa" }),
       {
         headers: {
-          ...JSON_HEADERS,
+          ...authHeaders,
           "Idempotency-Key": `${__VU}-${__ITER}-${Date.now()}`,
         },
         tags: { name: "pay" },

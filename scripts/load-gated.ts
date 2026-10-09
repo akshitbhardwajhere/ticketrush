@@ -4,9 +4,12 @@ import { Trend } from "k6/metrics";
 
 const BASE = __ENV.BASE_URL || "http://localhost:3000";
 const H = { "Content-Type": "application/json" };
+const PASSWORD = "load-test-password-2026";
 const queueWait = new Trend("queue_wait_ms", true);
 
-http.setResponseCallback(http.expectedStatuses(200, 201, 409, 429));
+http.setResponseCallback(
+  http.expectedStatuses(200, 201, 400, 401, 402, 403, 404, 409, 429),
+);
 
 export const options = {
   stages: [
@@ -37,15 +40,26 @@ export function setup() {
     .get(`${BASE}/events/${ev.id}/seats`)
     .json()
     .map((s) => s.id);
+  const runId = `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
   const users = [];
   for (let i = 0; i < 100; i++) {
-    users.push(
-      http
-        .post(`${BASE}/users`, JSON.stringify({ email: `k6-${i}@test.com` }), {
-          headers: H,
-        })
-        .json().id,
+    const email = `k6-gated-${runId}-${i}@test.com`;
+    const create = http.post(
+      `${BASE}/users`,
+      JSON.stringify({ email, password: PASSWORD }),
+      { headers: H },
     );
+    check(create, { "user: created": (r) => r.status === 201 });
+    const login = http.post(
+      `${BASE}/users/login`,
+      JSON.stringify({ email, password: PASSWORD }),
+      { headers: H },
+    );
+    const token = login.json("token");
+    check(login, {
+      "user: logged in": (r) => r.status === 200 && typeof token === "string",
+    });
+    users.push({ token });
   }
   console.log(`EVENT_ID=${ev.id}`);
   return { eventId: ev.id, seats, users };
@@ -54,21 +68,22 @@ export function setup() {
 let admittedUntil = 0; // har VU ka apna state
 
 export default function (data) {
-  const userId = data.users[(__VU - 1) % data.users.length];
+  const user = data.users[(__VU - 1) % data.users.length];
+  const authHeaders = { ...H, Authorization: `Bearer ${user.token}` };
 
   // Pass nahi hai ya expire ho gaya: queue join karo aur admit hone tak ruko
   if (Date.now() >= admittedUntil) {
     const t0 = Date.now();
-    http.post(
-      `${BASE}/events/${data.eventId}/queue/join`,
-      JSON.stringify({ userId }),
-      { headers: H, tags: { name: "queue_join" } },
-    );
+    http.post(`${BASE}/events/${data.eventId}/queue/join`, JSON.stringify({}), {
+      headers: authHeaders,
+      tags: { name: "queue_join" },
+    });
 
     for (let i = 0; i < 240; i++) {
       // max ~2 min wait
       const s = http
-        .get(`${BASE}/events/${data.eventId}/queue/status?userId=${userId}`, {
+        .get(`${BASE}/events/${data.eventId}/queue/status`, {
+          headers: authHeaders,
           tags: { name: "queue_status" },
         })
         .json();
@@ -85,8 +100,8 @@ export default function (data) {
   const seatId = data.seats[Math.floor(Math.random() * data.seats.length)];
   const hold = http.post(
     `${BASE}/events/${data.eventId}/seats/${seatId}/hold`,
-    JSON.stringify({ userId }),
-    { headers: H, tags: { name: "hold" } },
+    JSON.stringify({}),
+    { headers: authHeaders, tags: { name: "hold" } },
   );
   check(hold, {
     "hold: 201/403/409/429": (r) => [201, 403, 409, 429].includes(r.status),
@@ -95,9 +110,12 @@ export default function (data) {
   if (hold.status === 201) {
     const pay = http.post(
       `${BASE}/events/${data.eventId}/seats/${seatId}/pay`,
-      JSON.stringify({ userId, amountPaise: 150000 }),
+      JSON.stringify({ amountPaise: 150000, paymentMethodId: "pm_card_visa" }),
       {
-        headers: { ...H, "Idempotency-Key": `${__VU}-${__ITER}-${Date.now()}` },
+        headers: {
+          ...authHeaders,
+          "Idempotency-Key": `${__VU}-${__ITER}-${Date.now()}`,
+        },
         tags: { name: "pay" },
       },
     );

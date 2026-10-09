@@ -5,11 +5,15 @@ meta {
 }
 
 get {
-  url: {{baseUrl}}/events/1/queue/status?userId=1
+  url: {{baseUrl}}/events/{{eventId}}/queue/status
   body: none
-  auth: none
+  auth: bearer
 }
 
-params:query {
-  userId: 1
+auth:bearer {
+  token: {{token}}
+}
+
+vars:pre-request {
+  eventId: 2
 }

@@ -5,11 +5,20 @@ meta {
 }
 
 post {
-  url: {{baseUrl}}/events/1/seats/1/hold
+  url: {{baseUrl}}/events/{{eventId}}/seats/{{seatId}}/hold
   body: json
-  auth: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: nAztSllwrAGDpniYHRAQLH-8e99THjjqJmhPZKfCa9I
 }
 
 body:json {
-  { "userId": 1 }
+  {}
+}
+
+vars:pre-request {
+  eventId: 2
+  seatId: 102
 }

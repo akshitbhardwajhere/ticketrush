@@ -5,11 +5,19 @@ meta {
 }
 
 post {
-  url: {{baseUrl}}/events/1/queue/join
+  url: {{baseUrl}}/events/{{eventId}}/queue/join
   body: json
-  auth: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{token}}
 }
 
 body:json {
-  { "userId": 1 }
+  {}
+}
+
+vars:pre-request {
+  eventId: 2
 }

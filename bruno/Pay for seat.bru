@@ -5,18 +5,23 @@ meta {
 }
 
 post {
-  url: {{baseUrl}}/events/1/seats/1/pay
+  url: {{baseUrl}}/events/{{eventId}}/seats/{{seatId}}/pay
   body: json
-  auth: none
+  auth: bearer
 }
 
 headers {
   Idempotency-Key: {{$randomUUID}}
 }
 
+auth:bearer {
+  token: {{token}}
+}
+
 body:json {
   {
-    "userId": 1,
-    "amountPaise": 150000
+    "amountPaise": 150000,
+    "paymentMethodId": "pm_card_visa"
   }
 }
+

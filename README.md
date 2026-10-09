@@ -2,7 +2,7 @@
 
 A concurrency-safe ticket booking backend (think BookMyShow): seats can never be double-booked, payments are idempotent, and flash-sale traffic is absorbed by a rate limiter and a Redis-backed waiting room.
 
-**Stack:** Node.js, TypeScript, Express, PostgreSQL, Redis, k6 (load testing)
+**Stack:** Node.js, TypeScript, Express, PostgreSQL, Redis, Stripe, HAProxy, k6 (load testing)
 
 ## Highlights
 
@@ -11,17 +11,20 @@ A concurrency-safe ticket booking backend (think BookMyShow): seats can never be
 - Idempotent payments: retries and double-clicks never charge twice.
 - Redis token-bucket rate limiter (atomic Lua script) against abusive clients.
 - Waiting room (FIFO queue plus time-limited admission passes) that protects the database during flash sales.
+- Password-backed authentication with expiring database sessions.
+- Stripe PaymentIntents with idempotency keys and outbox-backed refunds.
+- Three API replicas behind HAProxy with automated tests and a Redis/PostgreSQL chaos harness.
 
 ## Key design decisions
 
-| Problem | Solution |
-|---|---|
-| Two users grab the same seat | The check and the write are one SQL statement (`UPDATE ... WHERE status = 'AVAILABLE' OR hold expired`). Postgres row locks serialise concurrent updates, so exactly one wins. Payment re-checks the hold under `SELECT ... FOR UPDATE` inside the booking transaction. |
-| Abandoned holds | `hold_expires_at` is checked in the same `WHERE` clause, so expired holds are reclaimed lazily with no cron job. |
-| Double charge on retry or double-click | The client sends an `Idempotency-Key`. The key is claimed with `INSERT ... ON CONFLICT DO NOTHING` (atomic). Same key and same body replays the stored response, same key with a different body returns 422, and a concurrent duplicate gets 409 "in progress". |
-| Hold expires while payment is in flight | The booking transaction re-validates the hold. If it is gone, the payment is marked `REFUND_REQUIRED` instead of silently double-selling. |
-| Bots and abusive clients | Token bucket in Redis, written as a Lua script so read-modify-write is atomic. It uses Redis `TIME` (no clock skew between servers) and fails open if Redis is down. |
-| Traffic spikes | Waiting room: a Redis sorted set (FIFO by join time). A background admitter pops N users per second (`ZPOPMIN` is atomic, so it is safe with several server instances) and issues passes with a TTL. Enabled with `QUEUE_GATE=on`. |
+| Problem                                 | Solution                                                                                                                                                                                                                                                                |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Two users grab the same seat            | The check and the write are one SQL statement (`UPDATE ... WHERE status = 'AVAILABLE' OR hold expired`). Postgres row locks serialise concurrent updates, so exactly one wins. Payment re-checks the hold under `SELECT ... FOR UPDATE` inside the booking transaction. |
+| Abandoned holds                         | `hold_expires_at` is checked in the same `WHERE` clause, so expired holds are reclaimed lazily with no cron job.                                                                                                                                                        |
+| Double charge on retry or double-click  | The client sends an `Idempotency-Key`. The key is claimed with `INSERT ... ON CONFLICT DO NOTHING` (atomic). Same key and same body replays the stored response, same key with a different body returns 422, and a concurrent duplicate gets 409 "in progress".         |
+| Hold expires while payment is in flight | The booking transaction re-validates the hold. If it is gone, the payment is marked `REFUND_REQUIRED` and an outbox event schedules an idempotent refund.                                                                                                           |
+| Bots and abusive clients                | Token bucket in Redis, written as a Lua script so read-modify-write is atomic. It uses Redis `TIME` (no clock skew between servers) and fails open if Redis is down.                                                                                                    |
+| Traffic spikes                          | Waiting room: a Redis sorted set (FIFO by join time). A background admitter pops N users per second (`ZPOPMIN` is atomic, so it is safe with several server instances) and issues passes with a TTL. Enabled with `QUEUE_GATE=on`.                                      |
 
 ## Results
 
@@ -29,11 +32,11 @@ Measured on a single laptop (API, PostgreSQL, Redis and k6 on the same machine) 
 
 **k6 load test, queue gate off:** 100 concurrent users, 70 s, about 100 req/s sustained, 0% server errors.
 
-| Endpoint | p95 latency |
-|---|---|
-| Hold seat | 3.3 ms |
-| Seat list (3,000 seats) | 4.8 ms |
-| Pay | 774 ms (dominated by the simulated gateway) |
+| Endpoint                | p95 latency                                 |
+| ----------------------- | ------------------------------------------- |
+| Hold seat               | 3.3 ms                                      |
+| Seat list (3,000 seats) | 4.8 ms                                      |
+| Pay                     | 774 ms (dominated by the simulated gateway) |
 
 The ~100 req/s figure is the load profile of the test (each virtual user waits 1 s between iterations), not the server's capacity limit.
 
@@ -45,7 +48,7 @@ The ~100 req/s figure is the load profile of the test (each virtual user waits 1
 
 ## Architecture
 
-TicketRush is an Express API with a thin HTTP layer. Controllers validate requests and format responses, services own business rules and PostgreSQL transactions, Redis handles queue admission and rate limiting, and the payment gateway is currently a process-local mock used by the payment service.
+TicketRush is an Express API with a thin HTTP layer. Controllers validate requests and format responses, services own business rules and PostgreSQL transactions, Redis handles queue admission and rate limiting, and the payment gateway uses Stripe PaymentIntents in production or an explicit local mock for development and load tests.
 
 ```mermaid
 flowchart LR
@@ -54,7 +57,7 @@ flowchart LR
   Routes --> Controllers[Controllers]
   Controllers --> Services[Services]
   Services --> Postgres[(PostgreSQL)]
-  Services --> Gateway[Mock payment gateway]
+  Services --> Gateway[Stripe or local gateway]
   API --> Queue[Queue router and admitter]
   Queue --> Redis[(Redis)]
   API --> RateLimit[Rate-limit middleware]
@@ -73,8 +76,10 @@ sequenceDiagram
   participant D as PostgreSQL
   participant G as Payment gateway
 
-  C->>A: POST /users
-  A->>D: Create or reuse user
+  C->>A: POST /users with email and password
+  A->>D: Create user
+  C->>A: POST /users/login
+  A->>D: Create session
   C->>A: POST /events
   A->>D: Create event and seats
   C->>A: POST /events/{eventId}/queue/join
@@ -91,6 +96,7 @@ sequenceDiagram
   A->>D: Claim idempotency key
   A->>G: Charge payment
   A->>D: Lock seat, book it, store result
+  A->>D: Commit payment outbox event
   A-->>C: 200 BOOKED
 ```
 
@@ -114,7 +120,7 @@ npm run create-tables
 npm run dev
 ```
 
-The API listens on `http://localhost:3000` by default. Redis listens on port `6331` and PostgreSQL on port `5441`.
+HAProxy publishes the API on `http://localhost:3000` by default. Redis listens on port `6331` and PostgreSQL on port `5441`.
 
 ## Commands
 
@@ -127,10 +133,12 @@ The API listens on `http://localhost:3000` by default. Redis listens on port `63
 - `npm run load:k6` runs the k6 load test without queue admission.
 - `npm run load:gated:k6` runs the k6 load test with queue admission.
 - `npm run create-tables` creates the base schema and applies all migrations.
+- `npm test` runs unit and integration tests.
+- `sh scripts/chaos.sh` exercises Redis and PostgreSQL interruption scenarios.
 
 ## k6 load tests
 
-Install [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/) separately, then start the API with the mode required by the test.
+Install [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/) separately, then start the API with the mode required by the test. The scripts register and log in unique users during setup, then use bearer tokens for queue, hold, and payment requests.
 
 ### Ungated load test
 
@@ -146,6 +154,8 @@ Set a different API URL with `BASE_URL`:
 ```sh
 BASE_URL=http://localhost:3000 k6 run scripts/load.ts
 ```
+
+For the Compose stack shown in this repository, use `BASE_URL=http://127.0.0.1:3002`. Keep `PAYMENT_GATEWAY=mock` for load tests unless you intentionally want to create Stripe test PaymentIntents at load volume.
 
 The load test setup creates one event with 3,000 seats and 100 users. It then runs 100 virtual users through a 70-second test:
 
@@ -179,6 +189,8 @@ Use `BASE_URL` for a non-default API address:
 BASE_URL=http://localhost:3000 npm run load:gated:k6
 ```
 
+The same `BASE_URL=http://127.0.0.1:3002` and mock-gateway recommendation applies to the gated test.
+
 ## Configuration
 
 Copy the local values into `.env` when overriding defaults:
@@ -192,6 +204,10 @@ Copy the local values into `.env` when overriding defaults:
 | `ADMIT_PER_TICK` | `20`                                                 | Queue admissions per second                      |
 | `PASS_TTL_SEC`   | `120`                                                | How long an admission pass stays valid           |
 | `FAIL_RATE`      | `0`                                                  | Simulated payment gateway failure rate           |
+| `PAYMENT_GATEWAY` | `mock`                                               | Set to `stripe` to enable Stripe PaymentIntents  |
+| `STRIPE_SECRET_KEY` | unset                                             | Stripe secret key; keep it in `.env` or a secret manager |
+| `PAYMENT_CURRENCY` | `inr`                                               | Stripe currency                                  |
+| `API_HTTP_PORT`  | `3000`                                               | Host port published by HAProxy                   |
 
 ## Database changes
 
@@ -211,7 +227,7 @@ src/
   db.ts, redis.ts       External service clients
   queue.ts              Queue admission middleware and worker
   ratelimit.ts          Redis token-bucket implementation
-  gateway.ts            Payment gateway adapter
+  gateway.ts            Stripe/local payment gateway adapter
   http-error-handler.ts Shared HTTP error responses
 scripts/                Manual concurrency and rate-limit scenarios
 bruno/                  Bruno API collection
@@ -233,7 +249,23 @@ npx tsx scripts/pay-race.ts [seatId]
 ## Known limitations and future work
 
 - If the server crashes after charging but before committing, a payment can stay `PROCESSING`. A sweeper job should retry those with the same idempotency key (safe, because the gateway is idempotent).
-- `REFUND_REQUIRED` payments need a refund worker.
+- Refunds are processed by the outbox worker; failed refund attempts remain pending for retry.
 - Queue status is polled; Server-Sent Events or WebSockets would cut polling traffic.
-- No authentication yet: `userId` is passed in the request body.
-- The payment gateway is a process-local mock.
+- Authentication uses password-backed, database sessions. Register with `POST /users` and login with `POST /users/login`; send the returned token as `Authorization: Bearer ...`.
+- Payments use Stripe PaymentIntents when `STRIPE_SECRET_KEY` is configured. The local simulator is used only when `PAYMENT_GATEWAY` is not `stripe`.
+- Payment completion emits a transactional outbox event, and every API replica runs a `SKIP LOCKED` worker.
+
+## Production-like local stack
+
+The compose stack runs three API replicas behind HAProxy on `http://localhost:3000`. It includes PostgreSQL, Redis, migrations, and the load balancer; Grafana and Prometheus are not part of the stack. Start it with:
+
+```sh
+docker compose up -d --build
+npm run create-tables
+```
+
+If port `3000` is already in use, set `API_HTTP_PORT` to publish HAProxy on another host port, for example `API_HTTP_PORT=3002 docker compose up -d --build`.
+
+Run automated checks with `npm test` and `npm run typecheck`. Run the failure harness with `sh scripts/chaos.sh`; after a chaos run, verify the invariant that every `SUCCEEDED` payment has exactly one `BOOKED` seat.
+
+Set `STRIPE_SECRET_KEY` and `PAYMENT_GATEWAY=stripe` for real payments. Never use the local simulator in production. A public deployment still needs a cloud account, managed PostgreSQL/Redis, Stripe credentials, TLS, and a secret manager; this repository cannot provision an external account without those credentials.

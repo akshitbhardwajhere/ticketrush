@@ -8,3 +8,57 @@ services:
   redis:
     image: redis:7
     ports: ["6331:6379"]
+  migrate:
+    image: postgres:16
+    environment:
+      PGPASSWORD: pass
+    volumes:
+      - ./schema.sql:/migrations/001_schema.sql:ro
+      - ./migrations:/migrations/incremental:ro
+    depends_on: [db]
+    command: >-
+      sh -c "until pg_isready -h db -U postgres; do sleep 1; done;
+      psql -h db -U postgres -d ticketrush -f /migrations/001_schema.sql;
+      for migration in /migrations/incremental/*.sql; do
+      psql -h db -U postgres -d ticketrush -f \"$$migration\";
+      done"
+  api-1:
+    build: .
+    environment: &api-env
+      DATABASE_URL: postgres://postgres:pass@db:5432/ticketrush
+      REDIS_URL: redis://redis:6379
+      PAYMENT_GATEWAY: ${PAYMENT_GATEWAY:-mock}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      PAYMENT_CURRENCY: ${PAYMENT_CURRENCY:-inr}
+      PORT: 3000
+      INSTANCE_ID: api-1
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+  api-2:
+    build: .
+    environment:
+      <<: *api-env
+      INSTANCE_ID: api-2
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+  api-3:
+    build: .
+    environment:
+      <<: *api-env
+      INSTANCE_ID: api-3
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+  load-balancer:
+    image: haproxy:3.0
+    ports: ["${API_HTTP_PORT:-3000}:3000", "${HAPROXY_STATS_PORT:-8404}:8404"]
+    volumes: ["./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro"]
+    depends_on: [api-1, api-2, api-3]

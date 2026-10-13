@@ -8,10 +8,13 @@ docker compose stop redis
 trap 'docker compose start redis db 2>/dev/null || true' EXIT
 sleep 10
 curl --fail "${BASE_URL}/health"
-echo "Stopping PostgreSQL for 10 seconds; requests may fail, but no partial booking is accepted"
+echo "Stopping PostgreSQL for 10 seconds; requests may fail"
 docker compose start redis
 docker compose stop db
 sleep 10
 docker compose start db
+until docker compose exec -T db pg_isready -U postgres -d ticketrush >/dev/null 2>&1; do
+	sleep 1
+done
 curl --fail "${BASE_URL}/health"
-echo "Chaos run complete. Verify payments and seats with the SQL invariants in README."
+echo "Chaos run complete. This harness checks health and restart recovery; verify payment and seat invariants separately."

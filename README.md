@@ -1,5 +1,7 @@
 # TicketRush
 
+[![CI](https://github.com/akshitbhardwajhere/ticketrush/actions/workflows/ci.yml/badge.svg)](https://github.com/akshitbhardwajhere/ticketrush/actions/workflows/ci.yml)
+
 A concurrency-safe ticket booking backend (think BookMyShow): seats can never be double-booked, payments are idempotent, and flash-sale traffic is absorbed by a rate limiter and a Redis-backed waiting room.
 
 **Stack:** Node.js, TypeScript, Express, PostgreSQL, Redis, Stripe, HAProxy, k6 (load testing)
@@ -35,7 +37,7 @@ Measured locally on 2026-10-09 with three API replicas behind HAProxy, 100 VUs, 
 | Gate off                      | 6,324 requests, 0% HTTP failures; hold p95 3.75ms, seat list p95 6.33ms, pay p95 1.40s          |
 | Gate on (`ADMIT_PER_TICK=20`) | 6,516 requests, 0% HTTP failures; hold p95 4.7ms, queue status p95 2.82ms, queue wait p95 1.01s |
 
-All load-test checks passed. The ungated pay target of `<1s` was exceeded by Stripe network/API latency under concurrency. Queue time is measured separately, so gate-on hold p95 only includes the post-admission database request.
+All load-test checks passed except the ungated pay latency threshold: p95 was 1.40s against the configured `<1s` target because of Stripe network/API latency under concurrency. Queue time is measured separately, so gate-on hold p95 only includes the post-admission database request. With `ADMIT_PER_TICK=20`, the gate-on run did not create a substantial waiting room; a throttled run at `ADMIT_PER_TICK=2` is the meaningful queue demonstration.
 
 Post-run SQL invariants: 589 successful Stripe PaymentIntents, 589 booked seats, and 0 duplicate successful payments for one seat.
 
@@ -148,7 +150,7 @@ Set a different API URL with `BASE_URL`:
 BASE_URL=http://localhost:3000 k6 run scripts/load.ts
 ```
 
-For the Compose stack shown in this repository, use `BASE_URL=http://127.0.0.1:3002`. Keep `PAYMENT_GATEWAY=mock` for load tests unless you intentionally want to create Stripe test PaymentIntents at load volume.
+For a Compose stack published on its default host port, use `BASE_URL=http://127.0.0.1:3000`. Set `API_HTTP_PORT=3002` only when port 3000 is already occupied. Keep `PAYMENT_GATEWAY=mock` for load tests unless you intentionally want to create Stripe test PaymentIntents at load volume.
 
 The load test setup creates one event with 3,000 seats and 100 users. It then runs 100 virtual users through a 70-second test:
 
@@ -182,7 +184,7 @@ Use `BASE_URL` for a non-default API address:
 BASE_URL=http://localhost:3000 npm run load:gated:k6
 ```
 
-The same `BASE_URL=http://127.0.0.1:3002` and mock-gateway recommendation applies to the gated test.
+The same `BASE_URL` and mock-gateway recommendation applies to the gated test.
 
 ## Configuration
 
@@ -222,11 +224,15 @@ src/
   ratelimit.ts          Redis token-bucket implementation
   gateway.ts            Stripe/local payment gateway adapter
   http-error-handler.ts Shared HTTP error responses
-scripts/                Manual concurrency and rate-limit scenarios
+  outbox.ts             Transactional outbox worker with SKIP LOCKED
+  services/auth-service.ts Password hashing and database sessions
+scripts/                Manual concurrency, load, and chaos scenarios
 bruno/                  Bruno API collection
 migrations/             Incremental SQL changes
 schema.sql              Clean local bootstrap schema
-docker-compose.yml      PostgreSQL and Redis services
+docker-compose.yml      PostgreSQL, Redis, migrations, API replicas, and HAProxy
+haproxy.cfg             Load-balancer configuration
+.github/workflows/      CI typecheck and test workflow
 tsconfig.json           TypeScript compiler configuration
 ```
 
@@ -241,10 +247,10 @@ npx tsx scripts/pay-race.ts [seatId]
 
 ## Known limitations and future work
 
-- If the server crashes after charging but before committing, a payment can stay `PROCESSING`. A sweeper job should retry those with the same idempotency key (safe, because the gateway is idempotent).
+- Payments left `PROCESSING` by a crash are retried by the reconciliation worker after five minutes using the same idempotency key. Stripe webhooks remain future work for faster confirmation of ambiguous asynchronous outcomes.
 - Refunds are processed by the outbox worker; failed refund attempts remain pending for retry.
 - Queue status is polled; Server-Sent Events or WebSockets would cut polling traffic.
-- Authentication uses password-backed, database sessions. Register with `POST /users` and login with `POST /users/login`; send the returned token as `Authorization: Bearer ...`.
+- Authentication uses salted Node `scrypt` password hashes and random bearer tokens stored only as SHA-256 hashes in PostgreSQL; sessions expire after 30 days. Register with `POST /users` and login with `POST /users/login`; send the returned token as `Authorization: Bearer ...`.
 - Payments use Stripe PaymentIntents when `STRIPE_SECRET_KEY` is configured. The local simulator is used only when `PAYMENT_GATEWAY` is not `stripe`.
 - Payment completion emits a transactional outbox event, and every API replica runs a `SKIP LOCKED` worker.
 
@@ -258,6 +264,13 @@ npm run create-tables
 ```
 
 If port `3000` is already in use, set `API_HTTP_PORT` to publish HAProxy on another host port, for example `API_HTTP_PORT=3002 docker compose up -d --build`.
+
+`npm run dev` starts one API directly on `PORT=3000`, so use it instead of the Compose HAProxy endpoint, or choose another `PORT` while the production-like stack is running.
+
+The chaos script stops Redis and PostgreSQL for ten seconds and checks HAProxy health before and after each interruption. It does not currently run booking traffic or query the SQL invariants, so its result is a connectivity and restart check rather than proof of payment or seat consistency.
+No recorded chaos-run result is committed yet; run it against the Compose stack when reporting an observed recovery result.
+
+The project is released under the ISC license; see [LICENSE](LICENSE).
 
 Run automated checks with `npm test` and `npm run typecheck`. Run the failure harness with `sh scripts/chaos.sh`; after a chaos run, verify the invariant that every `SUCCEEDED` payment has exactly one `BOOKED` seat.
 

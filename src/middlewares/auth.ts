@@ -1,5 +1,6 @@
 import type { RequestHandler } from "express";
 import { authenticate } from "../services/auth-service.js";
+import { resolveToken } from "../controllers/user-controller.js";
 
 declare global {
   namespace Express {
@@ -9,13 +10,22 @@ declare global {
   }
 }
 
+/**
+ * Middleware that validates a session and attaches `req.user`.
+ *
+ * Token resolution order:
+ *   1. Authorization: Bearer <token>  (API clients)
+ *   2. session cookie                 (browser clients)
+ */
 export const requireAuth: RequestHandler = async (req, res, next) => {
-  const header = req.header("Authorization");
-  if (!header?.startsWith("Bearer "))
+  const token = resolveToken(req);
+  if (!token)
     return res.status(401).json({ error: "Authentication required" });
-  const user = await authenticate(header.slice(7));
+
+  const user = await authenticate(token);
   if (!user)
     return res.status(401).json({ error: "Invalid or expired session" });
+
   req.user = user;
   next();
 };

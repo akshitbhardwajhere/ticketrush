@@ -20,7 +20,9 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@types/cookie-parser": "^1.4.10",
     "cookie": "^2.0.1",
+    "cookie-parser": "^1.4.7",
     "dotenv": "^18.0.6",
     "express": "^5.2.1",
     "ioredis": "^6.0.0",

@@ -34,6 +34,14 @@ services:
       PASS_TTL_SEC: ${PASS_TTL_SEC:-120}
       PORT: 3000
       INSTANCE_ID: api-1
+      # Cookie settings (COOKIE_SECURE=true required when TLS is active)
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      COOKIE_SECRET: ${COOKIE_SECRET:-change-me-in-production}
+      # Auth rate-limit tuning
+      AUTH_IP_CAPACITY: ${AUTH_IP_CAPACITY:-10}
+      AUTH_IP_REFILL: ${AUTH_IP_REFILL:-0.1}
+      AUTH_EMAIL_CAPACITY: ${AUTH_EMAIL_CAPACITY:-5}
+      AUTH_EMAIL_REFILL: ${AUTH_EMAIL_REFILL:-0.033}
     depends_on:
       migrate:
         condition: service_completed_successfully

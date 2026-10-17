@@ -43,7 +43,7 @@ Post-run SQL invariants: 589 successful Stripe PaymentIntents, 589 booked seats,
 
 ## Architecture
 
-TicketRush is an Express API with a thin HTTP layer. Controllers validate requests and format responses, services own business rules and PostgreSQL transactions, Redis handles queue admission and rate limiting, and the payment gateway uses Stripe PaymentIntents in production or an explicit local mock for development and load tests.
+TicketRush is an Express API with a thin HTTP layer. Controllers validate requests and format responses, services own business rules and PostgreSQL transactions, Redis handles queue admission and rate limiting, and payments use Stripe PaymentIntents.
 
 ```mermaid
 flowchart LR
@@ -150,7 +150,7 @@ Set a different API URL with `BASE_URL`:
 BASE_URL=http://localhost:3000 k6 run scripts/load.ts
 ```
 
-For a Compose stack published on its default host port, use `BASE_URL=http://127.0.0.1:3000`. Set `API_HTTP_PORT=3002` only when port 3000 is already occupied. Keep `PAYMENT_GATEWAY=mock` for load tests unless you intentionally want to create Stripe test PaymentIntents at load volume.
+For a Compose stack published on its default host port, use `BASE_URL=http://127.0.0.1:3000`. Set `API_HTTP_PORT=3002` only when port 3000 is already occupied. Load tests create Stripe test PaymentIntents, so configure a Stripe test secret before running them.
 
 The load test setup creates one event with 3,000 seats and 100 users. It then runs 100 virtual users through a 70-second test:
 
@@ -184,7 +184,7 @@ Use `BASE_URL` for a non-default API address:
 BASE_URL=http://localhost:3000 npm run load:gated:k6
 ```
 
-The same `BASE_URL` and mock-gateway recommendation applies to the gated test.
+The same `BASE_URL` and Stripe test-credential requirement applies to the gated test.
 
 ## Configuration
 
@@ -198,8 +198,6 @@ Copy the local values into `.env` when overriding defaults:
 | `QUEUE_GATE`        | `off`                                                | Set to `on` to require queue admission for holds         |
 | `ADMIT_PER_TICK`    | `20`                                                 | Queue admissions per second                              |
 | `PASS_TTL_SEC`      | `120`                                                | How long an admission pass stays valid                   |
-| `FAIL_RATE`         | `0`                                                  | Simulated payment gateway failure rate                   |
-| `PAYMENT_GATEWAY`   | `mock`                                               | Set to `stripe` to enable Stripe PaymentIntents          |
 | `STRIPE_SECRET_KEY` | unset                                                | Stripe secret key; keep it in `.env` or a secret manager |
 | `PAYMENT_CURRENCY`  | `inr`                                                | Stripe currency                                          |
 | `API_HTTP_PORT`     | `3000`                                               | Host port published by HAProxy                           |
@@ -251,7 +249,7 @@ npx tsx scripts/pay-race.ts [seatId]
 - Refunds are processed by the outbox worker; failed refund attempts remain pending for retry.
 - Queue status is polled; Server-Sent Events or WebSockets would cut polling traffic.
 - Authentication uses salted Node `scrypt` password hashes and random bearer tokens stored only as SHA-256 hashes in PostgreSQL; sessions expire after 30 days. Register with `POST /users` and login with `POST /users/login`; send the returned token as `Authorization: Bearer ...`.
-- Payments use Stripe PaymentIntents when `STRIPE_SECRET_KEY` is configured. The local simulator is used only when `PAYMENT_GATEWAY` is not `stripe`.
+- Payments use Stripe PaymentIntents and require `STRIPE_SECRET_KEY`.
 - Payment completion emits a transactional outbox event, and every API replica runs a `SKIP LOCKED` worker.
 
 ## Production-like local stack
@@ -274,4 +272,4 @@ The project is released under the ISC license; see [LICENSE](LICENSE).
 
 Run automated checks with `npm test` and `npm run typecheck`. Run the failure harness with `sh scripts/chaos.sh`; after a chaos run, verify the invariant that every `SUCCEEDED` payment has exactly one `BOOKED` seat.
 
-Set `STRIPE_SECRET_KEY` and `PAYMENT_GATEWAY=stripe` for real payments. Never use the local simulator in production. A public deployment still needs a cloud account, managed PostgreSQL/Redis, Stripe credentials, TLS, and a secret manager; this repository cannot provision an external account without those credentials.
+Set `STRIPE_SECRET_KEY` for Stripe test or live payments. A public deployment still needs a cloud account, managed PostgreSQL/Redis, Stripe credentials, TLS, and a secret manager; this repository cannot provision an external account without those credentials.

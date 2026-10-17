@@ -27,7 +27,6 @@ services:
     environment: &api-env
       DATABASE_URL: postgres://postgres:pass@db:5432/ticketrush
       REDIS_URL: redis://redis:6379
-      PAYMENT_GATEWAY: ${PAYMENT_GATEWAY:-mock}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       PAYMENT_CURRENCY: ${PAYMENT_CURRENCY:-inr}
       QUEUE_GATE: ${QUEUE_GATE:-off}

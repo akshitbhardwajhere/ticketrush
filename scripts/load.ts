@@ -20,7 +20,7 @@ export const options = {
     http_req_failed: ["rate<0.01"],
     "http_req_duration{name:hold}": ["p(95)<100"],
     "http_req_duration{name:list_seats}": ["p(95)<300"],
-    "http_req_duration{name:pay}": ["p(95)<1000"], // isme mock gateway ke 300-800ms shaamil hain
+    "http_req_duration{name:pay}": ["p(95)<1000"],
   },
 };
 

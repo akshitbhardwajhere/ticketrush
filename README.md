@@ -4,7 +4,7 @@
 
 A concurrency-safe ticket booking backend (think BookMyShow): seats can never be double-booked, payments are idempotent, and flash-sale traffic is absorbed by a rate limiter and a Redis-backed waiting room.
 
-**Stack:** Node.js, TypeScript, Express, PostgreSQL, Redis, Stripe, HAProxy, k6 (load testing)
+**Stack:** Node.js, TypeScript, Express, PostgreSQL, Redis, Stripe, Nginx, k6 (load testing)
 
 ## Highlights
 
@@ -15,7 +15,7 @@ A concurrency-safe ticket booking backend (think BookMyShow): seats can never be
 - Waiting room (FIFO queue plus time-limited admission passes) that protects the database during flash sales.
 - Password-backed authentication with expiring database sessions.
 - Stripe PaymentIntents with idempotency keys and outbox-backed refunds.
-- Three API replicas behind HAProxy with automated tests and a Redis/PostgreSQL chaos harness.
+- Three API replicas behind Nginx with automated tests and a Redis/PostgreSQL chaos harness.
 
 ## Key design decisions
 
@@ -30,16 +30,57 @@ A concurrency-safe ticket booking backend (think BookMyShow): seats can never be
 
 ## Results
 
-Measured locally on 2026-10-09 with three API replicas behind HAProxy, 100 VUs, 3,000 seats, and Stripe test mode. These are development measurements, not capacity guarantees.
+Measured on 2026-10-21 with three API replicas behind Nginx, 100 VUs, 3,000 seats.
+Run against `docker compose up -d --build` on localhost; Stripe payments not wired (no `STRIPE_SECRET_KEY`).
 
-| Profile                       | Result                                                                                          |
-| ----------------------------- | ----------------------------------------------------------------------------------------------- |
-| Gate off                      | 6,324 requests, 0% HTTP failures; hold p95 3.75ms, seat list p95 6.33ms, pay p95 1.40s          |
-| Gate on (`ADMIT_PER_TICK=20`) | 6,516 requests, 0% HTTP failures; hold p95 4.7ms, queue status p95 2.82ms, queue wait p95 1.01s |
+### Ungated (`QUEUE_GATE=off`) — `npm run load:k6`
 
-All load-test checks passed except the ungated pay latency threshold: p95 was 1.40s against the configured `<1s` target because of Stripe network/API latency under concurrency. Queue time is measured separately, so gate-on hold p95 only includes the post-admission database request. With `ADMIT_PER_TICK=20`, the gate-on run did not create a substantial waiting room; a throttled run at `ADMIT_PER_TICK=2` is the meaningful queue demonstration.
+Stages: 20 s ramp-up → 40 s steady at 100 VUs → 10 s ramp-down (total 1 m 10 s).
 
-Post-run SQL invariants: 589 successful Stripe PaymentIntents, 589 booked seats, and 0 duplicate successful payments for one seat.
+| Metric | Value |
+| --- | --- |
+| Total HTTP requests | 6,343 |
+| Throughput | 89.2 req/s |
+| Iterations completed | 5,542 |
+| `http_req_failed` rate | **1.16%** ✗ (threshold `<1%`) |
+| Hold p95 latency | **1.93 ms** ✓ (threshold `<100 ms`) |
+| Seat-list p95 latency | **5.68 ms** ✓ (threshold `<300 ms`) |
+| Pay p95 latency | 0 ms (no Stripe key — payments skipped) |
+| Data received | 89 MB (1.3 MB/s) |
+| Data sent | 1.1 MB (15 kB/s) |
+
+**Threshold detail:**
+- ✓ `http_req_duration{name:hold}` p95 < 100 ms
+- ✓ `http_req_duration{name:list_seats}` p95 < 300 ms
+- ✓ `http_req_duration{name:pay}` p95 < 1000 ms
+- ✗ `http_req_failed` — crossed at **1.16%** (74 / 6 343 requests)
+
+> The `http_req_failed` breach is caused by the setup phase hitting the per-IP auth rate limiter (`AUTH_IP_CAPACITY=10`): all 100 user-registration requests fire from the same loopback IP so 95 of them are rejected with `429`. Raise `AUTH_IP_CAPACITY` for multi-machine tests or distribute VUs across IPs to eliminate this.
+
+---
+
+### Queue-gated (`QUEUE_GATE=on`) — `QUEUE_GATE=on npm run load:gated:k6`
+
+Stages: 10 s ramp-up → 50 s steady at 100 VUs → 10 s ramp-down (total 1 m 10 s).
+
+| Metric | Value |
+| --- | --- |
+| Total HTTP requests | 18,041 |
+| Throughput | 179.9 req/s |
+| Iterations completed | 90 (98 interrupted — most VUs held in queue polling loop) |
+| `http_req_failed` rate | **0.00%** ✓ (threshold `<1%`) |
+| Hold p95 latency | **12.46 ms** ✓ (threshold `<100 ms`) |
+| Queue-status p95 latency | **2.02 ms** ✓ (threshold `<100 ms`) |
+| Queue wait (custom metric) | avg 1 s, p95 1 s |
+| Data received | 5.3 MB (52 kB/s) |
+| Data sent | 2.8 MB (28 kB/s) |
+
+**Threshold detail:**
+- ✓ `http_req_duration{name:hold}` p95 < 100 ms
+- ✓ `http_req_duration{name:queue_status}` p95 < 100 ms
+- ✓ `http_req_failed` — **0 failures** out of 18,041 requests
+
+> The high request count (18,041) with low iteration count (90 complete) reflects the queue polling pattern: each VU fires up to 240 `GET /queue/status` polls while waiting for `ADMITTED`. Hold p95 is higher than the ungated run because holding through the queue admission layer adds a database round-trip per admission check. The 1 s queue wait is the `sleep(0.5)` × 2 polling cycles before the first `ADMITTED` response — with `ADMIT_PER_TICK=20` the queue empties almost immediately. Use `ADMIT_PER_TICK=2 PASS_TTL_SEC=30` to force a visible multi-second backlog.
 
 ## Architecture
 
@@ -115,7 +156,7 @@ npm run create-tables
 npm run dev
 ```
 
-HAProxy publishes the API on `http://localhost:3000` by default. Redis listens on port `6331` and PostgreSQL on port `5441`.
+Nginx publishes the API on `http://localhost:3000` by default. Redis listens on port `6331` and PostgreSQL on port `5441`.
 
 ## Commands
 
@@ -200,7 +241,7 @@ Copy the local values into `.env` when overriding defaults:
 | `PASS_TTL_SEC`      | `120`                                                | How long an admission pass stays valid                   |
 | `STRIPE_SECRET_KEY` | unset                                                | Stripe secret key; keep it in `.env` or a secret manager |
 | `PAYMENT_CURRENCY`  | `inr`                                                | Stripe currency                                          |
-| `API_HTTP_PORT`     | `3000`                                               | Host port published by HAProxy                           |
+| `API_HTTP_PORT`     | `3000`                                               | Host port published by Nginx                             |
 
 ## Database changes
 
@@ -228,8 +269,8 @@ scripts/                Manual concurrency, load, and chaos scenarios
 bruno/                  Bruno API collection
 migrations/             Incremental SQL changes
 schema.sql              Clean local bootstrap schema
-docker-compose.yml      PostgreSQL, Redis, migrations, API replicas, and HAProxy
-haproxy.cfg             Load-balancer configuration
+docker-compose.yml      PostgreSQL, Redis, migrations, API replicas, and Nginx
+nginx.conf              Load-balancer and reverse-proxy configuration
 .github/workflows/      CI typecheck and test workflow
 tsconfig.json           TypeScript compiler configuration
 ```
@@ -254,18 +295,18 @@ npx tsx scripts/pay-race.ts [seatId]
 
 ## Production-like local stack
 
-The compose stack runs three API replicas behind HAProxy on `http://localhost:3000`. It includes PostgreSQL, Redis, migrations, and the load balancer; Grafana and Prometheus are not part of the stack. Start it with:
+The compose stack runs three API replicas behind Nginx on `http://localhost:3000`. It includes PostgreSQL, Redis, migrations, and the load balancer. Start it with:
 
 ```sh
 docker compose up -d --build
 npm run create-tables
 ```
 
-If port `3000` is already in use, set `API_HTTP_PORT` to publish HAProxy on another host port, for example `API_HTTP_PORT=3002 docker compose up -d --build`.
+If port `3000` is already in use, set `API_HTTP_PORT` to publish Nginx on another host port, for example `API_HTTP_PORT=3002 docker compose up -d --build`.
 
-`npm run dev` starts one API directly on `PORT=3000`, so use it instead of the Compose HAProxy endpoint, or choose another `PORT` while the production-like stack is running.
+`npm run dev` starts one API directly on `PORT=3000`, so use it instead of the Compose Nginx endpoint, or choose another `PORT` while the production-like stack is running.
 
-The chaos script stops Redis and PostgreSQL for ten seconds and checks HAProxy health before and after each interruption. It does not currently run booking traffic or query the SQL invariants, so its result is a connectivity and restart check rather than proof of payment or seat consistency.
+The chaos script stops Redis and PostgreSQL for ten seconds and checks Nginx health before and after each interruption. It does not currently run booking traffic or query the SQL invariants, so its result is a connectivity and restart check rather than proof of payment or seat consistency.
 No recorded chaos-run result is committed yet; run it against the Compose stack when reporting an observed recovery result.
 
 The project is released under the ISC license; see [LICENSE](LICENSE).

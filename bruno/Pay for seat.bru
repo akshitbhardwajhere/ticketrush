@@ -7,15 +7,11 @@ meta {
 post {
   url: {{baseUrl}}/events/{{eventId}}/seats/{{seatId}}/pay
   body: json
-  auth: bearer
+  auth: none
 }
 
 headers {
   Idempotency-Key: {{$randomUUID}}
-}
-
-auth:bearer {
-  token: _MqfMngtMqvXTCNyP0KUFI7W6ZITo6JcYzG4DAf6GKo
 }
 
 body:json {

@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 BASE_URL=${BASE_URL:-http://localhost:3000}
-echo "Running health checks through HAProxy at ${BASE_URL}"
+echo "Running health checks through Nginx at ${BASE_URL}"
 curl --fail "${BASE_URL}/health"
 echo "Stopping Redis for 10 seconds; rate limiting should fail open and booking state remains in PostgreSQL"
 docker compose stop redis

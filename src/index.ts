@@ -16,7 +16,7 @@ app.use(express.json());
 // Even if not using signed cookies today, the secret future-proofs the setup.
 app.use(cookieParser(config.cookieSecret));
 
-// Trust the first proxy so req.ip reflects the real client IP behind HAProxy / nginx
+// Trust the first proxy so req.ip reflects the real client IP behind Nginx
 app.set("trust proxy", 1);
 
 app.use(metricsMiddleware);

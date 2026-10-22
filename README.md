@@ -83,14 +83,38 @@ API available at `http://localhost:3000`. Redis on `6331`, PostgreSQL on `5441`.
 
 ## Load test results
 
-Measured with 3 API replicas, 100 VUs, 3 000 seats on localhost.
+Measured on 2026-10-22 with 3 API replicas behind Nginx, 100 VUs, 3 000 seats, live Stripe PaymentIntents (`pm_card_visa`, `AUTH_IP_CAPACITY=200`).
 
-| Mode | Requests | Throughput | `http_req_failed` | Hold p95 |
-| --- | --- | --- | --- | --- |
-| Ungated | 6 343 | 89.2 req/s | 1.16% ✗ | 1.93 ms ✓ |
-| Queue-gated | 18 041 | 179.9 req/s | 0.00% ✓ | 12.46 ms ✓ |
+### Ungated (`QUEUE_GATE=off`) — 20 s ramp · 40 s steady · 10 s ramp-down
 
-> The ungated failure rate is from 100 registration requests hitting the same loopback IP against `AUTH_IP_CAPACITY=10`. Raise `AUTH_IP_CAPACITY` or distribute VUs across IPs to eliminate it.
+| Metric | Value |
+| --- | --- |
+| Total HTTP requests | 6 334 |
+| Throughput | 81.7 req/s |
+| Iterations completed | 5 465 |
+| `http_req_failed` | **0.00%** ✓ |
+| Hold p95 | **2.36 ms** ✓ (threshold `<100 ms`) |
+| Seat-list p95 | **5.75 ms** ✓ (threshold `<300 ms`) |
+| Pay p95 | **1.45 s** ✗ (threshold `<1 000 ms`) |
+| Pay avg | 1.08 s · min 873 ms · max 1.53 s |
+| Data received | 90 MB (1.2 MB/s) |
+
+> Pay p95 crosses the 1 s threshold because every payment is a real Stripe API round-trip (~1 s avg). All other thresholds pass cleanly.
+
+### Queue-gated (`QUEUE_GATE=on`) — 10 s ramp · 50 s steady · 10 s ramp-down
+
+| Metric | Value |
+| --- | --- |
+| Total HTTP requests | 17 395 |
+| Throughput | 173.4 req/s |
+| Iterations completed | 405 (93 interrupted — VUs in queue poll loop at ramp-down) |
+| `http_req_failed` | **0.00%** ✓ |
+| Hold p95 | **11.97 ms** ✓ (threshold `<100 ms`) |
+| Queue-status p95 | **2.07 ms** ✓ (threshold `<100 ms`) |
+| Queue wait | avg 581 ms · p95 862 ms |
+| Data received | 5.1 MB (51 kB/s) |
+
+> High request count with low iteration count reflects the queue polling pattern — each VU fires repeated `GET /queue/status` calls while waiting for `ADMITTED`. Zero HTTP failures across all 17 395 requests.
 
 ---
 

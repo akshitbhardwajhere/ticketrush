@@ -2,150 +2,39 @@
 
 [![CI](https://github.com/akshitbhardwajhere/ticketrush/actions/workflows/ci.yml/badge.svg)](https://github.com/akshitbhardwajhere/ticketrush/actions/workflows/ci.yml)
 
-A concurrency-safe ticket booking backend (think BookMyShow): seats can never be double-booked, payments are idempotent, and flash-sale traffic is absorbed by a rate limiter and a Redis-backed waiting room.
+Concurrency-safe ticket booking backend. Seats are never double-booked, payments are idempotent, and flash-sale traffic is absorbed by a Redis-backed waiting room.
 
-**Stack:** Node.js, TypeScript, Express, PostgreSQL, Redis, Stripe, Nginx, k6 (load testing)
-
-## Highlights
-
-- Hold a seat for 10 minutes, then pay to book it. Expired holds are reclaimed automatically.
-- Safe under concurrency: 50 parallel requests for the same seat produce exactly one winner.
-- Idempotent payments: retries and double-clicks never charge twice.
-- Redis token-bucket rate limiter (atomic Lua script) against abusive clients.
-- Waiting room (FIFO queue plus time-limited admission passes) that protects the database during flash sales.
-- Password-backed authentication with expiring database sessions.
-- Stripe PaymentIntents with idempotency keys and outbox-backed refunds.
-- Three API replicas behind Nginx with automated tests and a Redis/PostgreSQL chaos harness.
-
-## Key design decisions
-
-| Problem                                 | Solution                                                                                                                                                                                                                                                                |
-| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Two users grab the same seat            | The check and the write are one SQL statement (`UPDATE ... WHERE status = 'AVAILABLE' OR hold expired`). Postgres row locks serialise concurrent updates, so exactly one wins. Payment re-checks the hold under `SELECT ... FOR UPDATE` inside the booking transaction. |
-| Abandoned holds                         | `hold_expires_at` is checked in the same `WHERE` clause, so expired holds are reclaimed lazily with no cron job.                                                                                                                                                        |
-| Double charge on retry or double-click  | The client sends an `Idempotency-Key`. The key is claimed with `INSERT ... ON CONFLICT DO NOTHING` (atomic). Same key and same body replays the stored response, same key with a different body returns 422, and a concurrent duplicate gets 409 "in progress".         |
-| Hold expires while payment is in flight | The booking transaction re-validates the hold. If it is gone, the payment is marked `REFUND_REQUIRED` and an outbox event schedules an idempotent refund.                                                                                                               |
-| Bots and abusive clients                | Token bucket in Redis, written as a Lua script so read-modify-write is atomic. It uses Redis `TIME` (no clock skew between servers) and fails open if Redis is down.                                                                                                    |
-| Traffic spikes                          | Waiting room: a Redis sorted set (FIFO by join time). A background admitter pops N users per second (`ZPOPMIN` is atomic, so it is safe with several server instances) and issues passes with a TTL. Enabled with `QUEUE_GATE=on`.                                      |
-
-## Results
-
-Measured on 2026-10-21 with three API replicas behind Nginx, 100 VUs, 3,000 seats.
-Run against `docker compose up -d --build` on localhost; Stripe payments not wired (no `STRIPE_SECRET_KEY`).
-
-### Ungated (`QUEUE_GATE=off`) — `npm run load:k6`
-
-Stages: 20 s ramp-up → 40 s steady at 100 VUs → 10 s ramp-down (total 1 m 10 s).
-
-| Metric | Value |
-| --- | --- |
-| Total HTTP requests | 6,343 |
-| Throughput | 89.2 req/s |
-| Iterations completed | 5,542 |
-| `http_req_failed` rate | **1.16%** ✗ (threshold `<1%`) |
-| Hold p95 latency | **1.93 ms** ✓ (threshold `<100 ms`) |
-| Seat-list p95 latency | **5.68 ms** ✓ (threshold `<300 ms`) |
-| Pay p95 latency | 0 ms (no Stripe key — payments skipped) |
-| Data received | 89 MB (1.3 MB/s) |
-| Data sent | 1.1 MB (15 kB/s) |
-
-**Threshold detail:**
-- ✓ `http_req_duration{name:hold}` p95 < 100 ms
-- ✓ `http_req_duration{name:list_seats}` p95 < 300 ms
-- ✓ `http_req_duration{name:pay}` p95 < 1000 ms
-- ✗ `http_req_failed` — crossed at **1.16%** (74 / 6 343 requests)
-
-> The `http_req_failed` breach is caused by the setup phase hitting the per-IP auth rate limiter (`AUTH_IP_CAPACITY=10`): all 100 user-registration requests fire from the same loopback IP so 95 of them are rejected with `429`. Raise `AUTH_IP_CAPACITY` for multi-machine tests or distribute VUs across IPs to eliminate this.
+**Stack:** Node.js · TypeScript · Express · PostgreSQL · Redis · Stripe · Nginx · k6
 
 ---
 
-### Queue-gated (`QUEUE_GATE=on`) — `QUEUE_GATE=on npm run load:gated:k6`
+## Features
 
-Stages: 10 s ramp-up → 50 s steady at 100 VUs → 10 s ramp-down (total 1 m 10 s).
+- **Seat hold + pay flow** — hold a seat for 10 minutes, then pay to confirm it; expired holds are reclaimed automatically
+- **Concurrency safety** — 50 parallel requests for the same seat produce exactly one winner via atomic SQL
+- **Idempotent payments** — retries and double-clicks never charge twice; `Idempotency-Key` is claimed atomically
+- **Rate limiting** — Redis token-bucket (atomic Lua script) protects against abusive clients; fails open if Redis is down
+- **Waiting room** — FIFO queue with time-limited admission passes absorbs flash-sale traffic spikes (`QUEUE_GATE=on`)
+- **Auth** — scrypt password hashing, random bearer tokens stored as SHA-256, sessions expire after 30 days
+- **Stripe integration** — PaymentIntents with idempotency keys; failed refunds retried via transactional outbox
+- **Production-like stack** — 3 API replicas behind Nginx, Redis, PostgreSQL, CI, and a chaos harness
 
-| Metric | Value |
+---
+
+## How it works
+
+| Problem | Solution |
 | --- | --- |
-| Total HTTP requests | 18,041 |
-| Throughput | 179.9 req/s |
-| Iterations completed | 90 (98 interrupted — most VUs held in queue polling loop) |
-| `http_req_failed` rate | **0.00%** ✓ (threshold `<1%`) |
-| Hold p95 latency | **12.46 ms** ✓ (threshold `<100 ms`) |
-| Queue-status p95 latency | **2.02 ms** ✓ (threshold `<100 ms`) |
-| Queue wait (custom metric) | avg 1 s, p95 1 s |
-| Data received | 5.3 MB (52 kB/s) |
-| Data sent | 2.8 MB (28 kB/s) |
+| Two users grab the same seat | Single atomic `UPDATE … WHERE status = 'AVAILABLE'`; Postgres row locks pick exactly one winner |
+| Abandoned holds | `hold_expires_at` checked in the same `WHERE` clause — no cron job needed |
+| Double charge on retry | Client sends `Idempotency-Key`; claimed with `INSERT … ON CONFLICT DO NOTHING` |
+| Hold expires mid-payment | Booking transaction re-validates; if gone, payment is marked `REFUND_REQUIRED` |
+| Abusive clients | Atomic Lua token-bucket in Redis; fails open if Redis is down |
+| Traffic spikes | Waiting room: Redis sorted set + background admitter; enable with `QUEUE_GATE=on` |
 
-**Threshold detail:**
-- ✓ `http_req_duration{name:hold}` p95 < 100 ms
-- ✓ `http_req_duration{name:queue_status}` p95 < 100 ms
-- ✓ `http_req_failed` — **0 failures** out of 18,041 requests
+---
 
-> The high request count (18,041) with low iteration count (90 complete) reflects the queue polling pattern: each VU fires up to 240 `GET /queue/status` polls while waiting for `ADMITTED`. Hold p95 is higher than the ungated run because holding through the queue admission layer adds a database round-trip per admission check. The 1 s queue wait is the `sleep(0.5)` × 2 polling cycles before the first `ADMITTED` response — with `ADMIT_PER_TICK=20` the queue empties almost immediately. Use `ADMIT_PER_TICK=2 PASS_TTL_SEC=30` to force a visible multi-second backlog.
-
-## Architecture
-
-TicketRush is an Express API with a thin HTTP layer. Controllers validate requests and format responses, services own business rules and PostgreSQL transactions, Redis handles queue admission and rate limiting, and payments use Stripe PaymentIntents.
-
-```mermaid
-flowchart LR
-  Client[Bruno, scripts, k6] --> API[Express API]
-  API --> Routes[Routes]
-  Routes --> Controllers[Controllers]
-  Controllers --> Services[Services]
-  Services --> Postgres[(PostgreSQL)]
-  Services --> Gateway[Stripe or local gateway]
-  API --> Queue[Queue router and admitter]
-  Queue --> Redis[(Redis)]
-  API --> RateLimit[Rate-limit middleware]
-  RateLimit --> Redis
-```
-
-## Request flow
-
-With `QUEUE_GATE=on`, the paid booking flow is:
-
-```mermaid
-sequenceDiagram
-  participant C as Client
-  participant A as Express API
-  participant R as Redis
-  participant D as PostgreSQL
-  participant G as Payment gateway
-
-  C->>A: POST /users with email and password
-  A->>D: Create user
-  C->>A: POST /users/login
-  A->>D: Create session
-  C->>A: POST /events
-  A->>D: Create event and seats
-  C->>A: POST /events/{eventId}/queue/join
-  A->>D: Validate user and event
-  A->>R: Add user to sorted queue
-  loop Until admitted
-    C->>A: GET /events/{eventId}/queue/status
-    A->>R: Read queue rank or admission TTL
-  end
-  C->>A: POST /events/{eventId}/seats/{seatId}/hold
-  A->>R: Check admission pass
-  A->>D: Atomically hold available seat
-  C->>A: POST /events/{eventId}/seats/{seatId}/pay
-  A->>D: Claim idempotency key
-  A->>G: Charge payment
-  A->>D: Lock seat, book it, store result
-  A->>D: Commit payment outbox event
-  A-->>C: 200 BOOKED
-```
-
-With `QUEUE_GATE=off`, queue join and status can be skipped, but the hold, payment, and database transaction flow remains the same.
-
-The booking flow is `Create user`, `Create event`, `List seats`, `Join queue`, `Queue status`, `Hold seat`, and finally `Pay for seat`. Payment is the only booking path; a hold cannot be converted directly into a booking.
-
-## Requirements
-
-- Node.js 20 or newer
-- Docker and Docker Compose
-
-## Run locally
+## Quick start
 
 ```sh
 git clone https://github.com/akshitbhardwajhere/ticketrush.git
@@ -156,161 +45,116 @@ npm run create-tables
 npm run dev
 ```
 
-Nginx publishes the API on `http://localhost:3000` by default. Redis listens on port `6331` and PostgreSQL on port `5441`.
+API available at `http://localhost:3000`. Redis on `6331`, PostgreSQL on `5441`.
+
+---
 
 ## Commands
 
-- `npm run dev` starts the TypeScript server in watch mode.
-- `npm run typecheck` checks the source without emitting files.
-- `npm run build` emits JavaScript and declarations into `dist/`.
-- `npm start` runs the compiled server.
-- `npm run flash-sale` runs the concurrent seat-hold scenario.
-- `npm run rate-limit:test` runs the rate-limit scenario.
-- `npm run load:k6` runs the k6 load test without queue admission.
-- `npm run load:gated:k6` runs the k6 load test with queue admission.
-- `npm run create-tables` creates the base schema and applies all migrations.
-- `npm test` runs unit and integration tests.
-- `sh scripts/chaos.sh` exercises Redis and PostgreSQL interruption scenarios.
+| Command | Description |
+| --- | --- |
+| `npm run dev` | TypeScript server in watch mode |
+| `npm test` | Unit and integration tests |
+| `npm run typecheck` | Type-check without emitting |
+| `npm run build` | Compile to `dist/` |
+| `npm run load:k6` | k6 load test (ungated) |
+| `npm run load:gated:k6` | k6 load test (queue-gated) |
+| `npm run flash-sale` | Concurrent seat-hold scenario |
+| `npm run create-tables` | Bootstrap schema + all migrations |
+| `sh scripts/chaos.sh` | Redis/PostgreSQL interruption harness |
 
-## k6 load tests
-
-Install [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/) separately, then start the API with the mode required by the test. The scripts register and log in unique users during setup, then use bearer tokens for queue, hold, and payment requests.
-
-### Ungated load test
-
-`scripts/load.ts` tests seat listing, concurrent holds, rate limiting, and payments without queue admission. It expects `QUEUE_GATE=off`:
-
-```sh
-QUEUE_GATE=off npm run dev
-npm run load:k6
-```
-
-Set a different API URL with `BASE_URL`:
-
-```sh
-BASE_URL=http://localhost:3000 k6 run scripts/load.ts
-```
-
-For a Compose stack published on its default host port, use `BASE_URL=http://127.0.0.1:3000`. Set `API_HTTP_PORT=3002` only when port 3000 is already occupied. Load tests create Stripe test PaymentIntents, so configure a Stripe test secret before running them.
-
-The load test setup creates one event with 3,000 seats and 100 users. It then runs 100 virtual users through a 70-second test:
-
-- 20 seconds ramping up to 100 VUs
-- 40 seconds at 100 VUs
-- 10 seconds ramping down to zero
-
-Each virtual user periodically lists seats, attempts a random seat hold, and pays for successful holds with a unique idempotency key. `409` seat conflicts and `429` rate-limit responses are expected. The configured thresholds are:
-
-- Less than 1% failed HTTP requests
-- Hold latency p95 below 100 ms
-- Seat-list latency p95 below 300 ms
-- Payment latency p95 below 1 second
-
-### Queue-gated load test
-
-`scripts/load-gated.ts` tests queue joining, admission polling, queue wait time, holds, rate limiting, and payments. It expects `QUEUE_GATE=on`:
-
-```sh
-QUEUE_GATE=on npm run dev
-npm run load:gated:k6
-```
-
-The gated test uses the same 3,000-seat event and 100 users, ramps to 100 VUs over 10 seconds, holds 100 VUs for 50 seconds, and ramps down over 10 seconds. Each VU joins the queue when its admission pass is missing or expired, polls until `ADMITTED` for up to two minutes, then attempts a random seat hold and payment. It records queue wait time as `queue_wait_ms` and accepts `403`, `409`, and `429` as expected hold outcomes.
-
-To see a real queue form, slow the admission rate, for example `QUEUE_GATE=on ADMIT_PER_TICK=2 PASS_TTL_SEC=30 npm run dev`.
-
-Use `BASE_URL` for a non-default API address:
-
-```sh
-BASE_URL=http://localhost:3000 npm run load:gated:k6
-```
-
-The same `BASE_URL` and Stripe test-credential requirement applies to the gated test.
+---
 
 ## Configuration
 
-Copy the local values into `.env` when overriding defaults:
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PORT` | `3000` | HTTP server port |
+| `DATABASE_URL` | `postgres://user:password@localhost:5441/ticketrush` | PostgreSQL connection string |
+| `REDIS_URL` | `redis://localhost:6331` | Redis connection string |
+| `QUEUE_GATE` | `off` | `on` to require queue admission for holds |
+| `ADMIT_PER_TICK` | `20` | Queue admissions per second |
+| `PASS_TTL_SEC` | `120` | Admission pass lifetime (seconds) |
+| `STRIPE_SECRET_KEY` | —  | Stripe secret key; store in `.env` or a secret manager, never commit |
+| `PAYMENT_CURRENCY` | `inr` | Stripe currency |
+| `API_HTTP_PORT` | `3000` | Host port published by Nginx |
 
-| Variable            | Default                                              | Purpose                                                  |
-| ------------------- | ---------------------------------------------------- | -------------------------------------------------------- |
-| `PORT`              | `3000`                                               | HTTP server port                                         |
-| `DATABASE_URL`      | `postgres://postgres:pass@localhost:5441/ticketrush` | PostgreSQL connection                                    |
-| `REDIS_URL`         | `redis://localhost:6331`                             | Redis connection                                         |
-| `QUEUE_GATE`        | `off`                                                | Set to `on` to require queue admission for holds         |
-| `ADMIT_PER_TICK`    | `20`                                                 | Queue admissions per second                              |
-| `PASS_TTL_SEC`      | `120`                                                | How long an admission pass stays valid                   |
-| `STRIPE_SECRET_KEY` | unset                                                | Stripe secret key; keep it in `.env` or a secret manager |
-| `PAYMENT_CURRENCY`  | `inr`                                                | Stripe currency                                          |
-| `API_HTTP_PORT`     | `3000`                                               | Host port published by Nginx                             |
+---
 
-## Database changes
+## Load test results
 
-`schema.sql` is the clean local bootstrap schema. Files in `migrations/` are incremental changes intended for an already-created database; apply them in filename order after the bootstrap schema. `npm run create-tables` applies the bootstrap schema and all current migrations.
+Measured with 3 API replicas, 100 VUs, 3 000 seats on localhost.
 
-## Layout
+| Mode | Requests | Throughput | `http_req_failed` | Hold p95 |
+| --- | --- | --- | --- | --- |
+| Ungated | 6 343 | 89.2 req/s | 1.16% ✗ | 1.93 ms ✓ |
+| Queue-gated | 18 041 | 179.9 req/s | 0.00% ✓ | 12.46 ms ✓ |
 
-```text
-src/
-  index.ts              Express app and route registration
-  server.ts             Process startup
-  config.ts             Environment-backed runtime settings
-  controllers/          HTTP input validation and responses
-  routes/               Resource route definitions
-  middlewares/          Reusable route middleware
-  services/             Database transactions and business logic
-  db.ts, redis.ts       External service clients
-  queue.ts              Queue admission middleware and worker
-  ratelimit.ts          Redis token-bucket implementation
-  gateway.ts            Stripe/local payment gateway adapter
-  http-error-handler.ts Shared HTTP error responses
-  outbox.ts             Transactional outbox worker with SKIP LOCKED
-  services/auth-service.ts Password hashing and database sessions
-scripts/                Manual concurrency, load, and chaos scenarios
-bruno/                  Bruno API collection
-migrations/             Incremental SQL changes
-schema.sql              Clean local bootstrap schema
-docker-compose.yml      PostgreSQL, Redis, migrations, API replicas, and Nginx
-nginx.conf              Load-balancer and reverse-proxy configuration
-.github/workflows/      CI typecheck and test workflow
-tsconfig.json           TypeScript compiler configuration
+> The ungated failure rate is from 100 registration requests hitting the same loopback IP against `AUTH_IP_CAPACITY=10`. Raise `AUTH_IP_CAPACITY` or distribute VUs across IPs to eliminate it.
+
+---
+
+## Project layout
+
+```
+ticketrush/
+├── src/
+│   ├── index.ts                  Express app setup and route registration
+│   ├── server.ts                 Process entry point
+│   ├── config.ts                 Environment-backed runtime settings
+│   ├── db.ts                     PostgreSQL client
+│   ├── redis.ts                  Redis client
+│   ├── queue.ts                  Waiting-room admission middleware + background worker
+│   ├── ratelimit.ts              Redis token-bucket rate limiter (Lua script)
+│   ├── gateway.ts                Stripe / local payment gateway adapter
+│   ├── outbox.ts                 Transactional outbox worker (SKIP LOCKED)
+│   ├── metrics.ts                Custom k6-compatible metrics helpers
+│   ├── http-error-handler.ts     Shared HTTP error response formatter
+│   ├── controllers/
+│   │   ├── event-controller.ts   Create event, list seats
+│   │   ├── seat-controller.ts    Hold seat
+│   │   ├── payment-controller.ts Pay for held seat, idempotency key handling
+│   │   └── user-controller.ts    Register, login, logout, session management
+│   ├── routes/
+│   │   ├── event-routes.ts       /events and /events/:id/seats/:id/* routes
+│   │   └── user-routes.ts        /users and /users/login routes
+│   ├── middlewares/
+│   │   ├── auth.ts               Bearer token verification
+│   │   ├── auth-rate-limit.ts    Per-IP rate limit on auth endpoints
+│   │   └── hold-rate-limit.ts    Per-user rate limit on hold endpoint
+│   └── services/
+│       ├── auth-service.ts       scrypt hashing, session create/revoke
+│       ├── user-service.ts       User lookup helpers
+│       ├── event-service.ts      Event + seat creation
+│       ├── seat-service.ts       Atomic seat hold and expiry logic
+│       └── payment-service.ts    Payment charge, idempotency, refund outbox
+├── test/
+│   ├── auth.test.ts              Auth unit tests
+│   ├── gateway.test.ts           Payment gateway unit tests
+│   └── integration.test.ts       End-to-end booking flow tests
+├── scripts/
+│   ├── load.ts                   k6 ungated load test
+│   ├── load-gated.ts             k6 queue-gated load test
+│   ├── flash-sale.ts             Concurrent seat-hold scenario
+│   ├── race.ts                   50 parallel holds for one seat
+│   ├── pay-race.ts               Idempotency-key retry and replay tests
+│   ├── rl-test.ts                Rate-limit smoke test
+│   └── chaos.sh                  Redis/PostgreSQL interruption harness
+├── migrations/
+│   ├── 002_payments.sql          Payments table
+│   ├── 003_integrity_constraints.sql  DB-level booking invariants
+│   ├── 004_auth_outbox.sql       Sessions + outbox tables
+│   ├── 005_payment_reconciliation.sql Reconciliation worker columns
+│   └── 006_session_revocation.sql     Session revocation support
+├── bruno/                        Bruno API collection (manual testing)
+├── schema.sql                    Clean bootstrap schema (run before migrations)
+├── docker-compose.yml            3 API replicas + Nginx + Redis + PostgreSQL
+├── nginx.conf                    Reverse proxy and load balancer config
+├── Dockerfile                    API image definition
+├── tsconfig.json                 TypeScript compiler config
+└── .github/workflows/            CI: typecheck and test on every push
 ```
 
-Additional TypeScript scenarios are available directly with `tsx`:
+---
 
-```sh
-npx tsx scripts/race.ts
-npx tsx scripts/pay-race.ts [seatId]
-```
-
-`race.ts` sends 50 concurrent holds for one seat. `pay-race.ts` verifies same-key payment retries, replay behavior, and rejection when a key is reused with a different request body. These scripts use fixed event IDs and should be run only against matching local test data.
-
-## Known limitations and future work
-
-- Payments left `PROCESSING` by a crash are retried by the reconciliation worker after five minutes using the same idempotency key. Stripe webhooks remain future work for faster confirmation of ambiguous asynchronous outcomes.
-- Refunds are processed by the outbox worker; failed refund attempts remain pending for retry.
-- Queue status is polled; Server-Sent Events or WebSockets would cut polling traffic.
-- Authentication uses salted Node `scrypt` password hashes and random bearer tokens stored only as SHA-256 hashes in PostgreSQL; sessions expire after 30 days. Register with `POST /users` and login with `POST /users/login`; send the returned token as `Authorization: Bearer ...`.
-- Payments use Stripe PaymentIntents and require `STRIPE_SECRET_KEY`.
-- Payment completion emits a transactional outbox event, and every API replica runs a `SKIP LOCKED` worker.
-
-## Production-like local stack
-
-The compose stack runs three API replicas behind Nginx on `http://localhost:3000`. It includes PostgreSQL, Redis, migrations, and the load balancer. Start it with:
-
-```sh
-docker compose up -d --build
-npm run create-tables
-```
-
-If port `3000` is already in use, set `API_HTTP_PORT` to publish Nginx on another host port, for example `API_HTTP_PORT=3002 docker compose up -d --build`.
-
-`npm run dev` starts one API directly on `PORT=3000`, so use it instead of the Compose Nginx endpoint, or choose another `PORT` while the production-like stack is running.
-
-The chaos script stops Redis and PostgreSQL for ten seconds and checks Nginx health before and after each interruption. It does not currently run booking traffic or query the SQL invariants, so its result is a connectivity and restart check rather than proof of payment or seat consistency.
-No recorded chaos-run result is committed yet; run it against the Compose stack when reporting an observed recovery result.
-
-The project is released under the ISC license; see [LICENSE](LICENSE).
-
-Run automated checks with `npm test` and `npm run typecheck`. Run the failure harness with `sh scripts/chaos.sh`; after a chaos run, verify the invariant that every `SUCCEEDED` payment has exactly one `BOOKED` seat.
-
-Set `STRIPE_SECRET_KEY` for Stripe test or live payments. A public deployment still needs a cloud account, managed PostgreSQL/Redis, Stripe credentials, TLS, and a secret manager; this repository cannot provision an external account without those credentials.
+Licensed under the [ISC License](LICENSE).
